@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+    <meta charset="UTF-8">
+    <title>QRIS Static To Dinamic</title>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+    <script>
+
+        function parseEMVString(qrisString) {
+            const map = {};
+            const entries = [];
+            let index = 0;
+            while (index < qrisString.length) {
+                const tag = qrisString.substring(index, index + 2);
+                const len = parseInt(qrisString.substring(index + 2, index + 4), 10);
+                const val = qrisString.substring(index + 4, index + 4 + len);
+                map[tag] = val;
+                entries.push({ tag, val });
+                index += 4 + len;
+            }
+            return { map, entries };
+        }
+
+        // Helper: CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF)
+        function crcCcitt(bytes) {
+            let crc = 0xFFFF;
+            for (let i = 0; i < bytes.length; i++) {
+                crc ^= (bytes[i] << 8);
+                for (let j = 0; j < 8; j++) {
+                    if ((crc & 0x8000) !== 0) {
+                        crc = ((crc << 1) ^ 0x1021) & 0xFFFF;
+                    } else {
+                        crc = (crc << 1) & 0xFFFF;
+                    }
+                }
+            }
+            return crc & 0xFFFF;
+        }
+
+        function stringToUtf8Bytes(str) {
+            return new TextEncoder().encode(str);
+        }
+
+        function toHex4(crc) {
+            return crc.toString(16).toUpperCase().padStart(4, '0');
+        }
+
+        function generateDynamicQris(qrisString, amount) {
+            const { map, entries } = parseEMVString(qrisString);
+            const amountFormatted = Number(amount).toFixed(2); // EMV expects decimal format
+
+            // Rebuild in original order, skipping old CRC (63) and replacing 54 if exists
+            let rebuilt = '';
+            let inserted54 = false;
+            for (const { tag, val } of entries) {
+                if (tag === '63') {
+                    // Insert 54 before CRC if it wasn't present
+                    if (!inserted54 && map['54'] === undefined) {
+                        const len = String(amountFormatted.length).padStart(2, '0');
+                        rebuilt += '54' + len + amountFormatted;
+                        inserted54 = true;
+                    }
+                    continue; // skip old CRC
+                }
+                if (tag === '54') {
+                    const len = String(amountFormatted.length).padStart(2, '0');
+                    rebuilt += '54' + len + amountFormatted;
+                    inserted54 = true;
+                } else {
+                    const len = String(val.length).padStart(2, '0');
+                    rebuilt += tag + len + val;
+                }
+            }
+
+            // If 54 still not inserted (edge case), insert now before CRC
+            if (!inserted54) {
+                const len = String(amountFormatted.length).padStart(2, '0');
+                rebuilt += '54' + len + amountFormatted;
+            }
+
+            // Append CRC (63 04 + CRC over bytes of rebuilt + '6304')
+            const toCheck = rebuilt + '6304';
+            const crc = crcCcitt(stringToUtf8Bytes(toCheck));
+            return rebuilt + '6304' + toHex4(crc);
+        }
+
+        // UI elements
+        document.addEventListener('DOMContentLoaded', () => {
+            const containerUpload = document.createElement('div');
+            containerUpload.className = 'card';
+            containerUpload.innerHTML = `
+        <h2>Upload QRIS</h2>
+        <label for="qris">Pilih file QRIS:</label>
+        <input type="file" id="qris" accept="image/*" required>
+        <button type="button" id="btnUpload">Upload</button>
+    `;
+            document.body.insertBefore(containerUpload, document.body.firstChild);
+
+            const resultsContainer = document.createElement('div');
+            document.body.appendChild(resultsContainer);
+
+            const fileInput = containerUpload.querySelector('#qris');
+            const uploadBtn = containerUpload.querySelector('#btnUpload');
+
+            if (fileInput) {
+                fileInput.addEventListener('change', function () {
+                    if (this.files && this.files[0]) {
+                        this.classList.add('success');
+                    }
+                });
+            }
+
+            uploadBtn.addEventListener('click', async () => {
+                uploadBtn.classList.add('loading');
+                const originalText = uploadBtn.textContent;
+                uploadBtn.textContent = '⏳ Processing...';
+                try {
+                    const file = fileInput.files && fileInput.files[0];
+                    if (!file) {
+                        throw new Error('Pilih file terlebih dahulu.');
+                    }
+                    const qrisString = await decodeQrFile(file);
+                    if (!qrisString) {
+                        showError('❌ Gagal decode QRIS. Pastikan file yang diupload adalah QRIS yang valid.');
+                        return;
+                    }
+                    const { map: parsed } = parseEMVString(qrisString);
+                    resultsContainer.innerHTML = '';
+                    const infoCard = document.createElement('div');
+                    infoCard.className = 'card';
+                    infoCard.innerHTML = `
+                <h3>📊 Data QRIS</h3>
+                <p><b>Merchant Name:</b> ${parsed['59'] || '-'}</p>
+                <p><b>Merchant City:</b> ${parsed['60'] || '-'}</p>
+                <p><b>Merchant ID:</b> ${parsed['26'] || '-'}</p>
+                <label for="amount">💰 Nominal (IDR):</label>
+                <input type="number" id="amount" placeholder="Masukkan nominal..." required>
+                <button type="button" id="btnGenerate">🚀 Buat QRIS Dinamis</button>
+            `;
+                    resultsContainer.appendChild(infoCard);
+
+                    const btnGenerate = infoCard.querySelector('#btnGenerate');
+                    const amountInput = infoCard.querySelector('#amount');
+                    btnGenerate.addEventListener('click', () => {
+                        const amount = amountInput.value;
+                        if (!amount) return;
+                        const dynamicQris = generateDynamicQris(qrisString, amount);
+                        const outputCard = document.createElement('div');
+                        outputCard.className = 'card';
+                        outputCard.innerHTML = `
+                    <h3>🎯 QRIS Dinamis</h3>
+                    <p><b>Nominal:</b> IDR ${Number(amount).toLocaleString('id-ID')}</p>
+                    <textarea id="qrisResult" rows="6" readonly>${dynamicQris}</textarea>
+                    <button type="button" class="copy-btn" id="copyBtn">📋 Copy QRIS String</button>
+                    <div class="qr-img">
+                        <img src="https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(dynamicQris)}&size=200x200" alt="QRIS QR Code">
+                    </div>
+                `;
+                        resultsContainer.appendChild(outputCard);
+                        const copyBtn = outputCard.querySelector('#copyBtn');
+                        copyBtn.addEventListener('click', copyToClipboard);
+                        setTimeout(() => outputCard.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
+                    });
+                } catch (e) {
+                    showError(e.message || 'Terjadi kesalahan saat memproses file.');
+                } finally {
+                    uploadBtn.textContent = originalText;
+                    uploadBtn.classList.remove('loading');
+                }
+            });
+        });
+
+        function showError(message) {
+            const card = document.createElement('div');
+            card.className = 'card';
+            card.innerHTML = `<div class="error">${message}</div>`;
+            document.body.appendChild(card);
+        }
+
+        async function decodeQrFile(file) {
+            const imgDataUrl = await readFileAsDataURL(file);
+            const img = await loadImage(imgDataUrl);
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = img.naturalWidth || img.width;
+            canvas.height = img.naturalHeight || img.height;
+            ctx.drawImage(img, 0, 0);
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const code = jsQR(imageData.data, canvas.width, canvas.height);
+            return code && code.data ? String(code.data) : '';
+        }
+
+        function readFileAsDataURL(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onerror = () => reject(new Error('Gagal membaca file'));
+                reader.onload = () => resolve(reader.result);
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function loadImage(src) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => resolve(img);
+                img.onerror = () => reject(new Error('Gagal memuat gambar'));
+                img.src = src;
+            });
+        }
+
+        // Interactive effects
+        // Copy to clipboard function
+        function copyToClipboard() {
+            const textarea = document.getElementById('qrisResult');
+            if (textarea) {
+                textarea.select();
+                document.execCommand('copy');
+                const copyBtn = document.querySelector('.copy-btn');
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = '✅ Copied!';
+                copyBtn.style.background = 'rgba(76, 175, 80, 0.2)';
+                copyBtn.style.borderColor = 'rgba(76, 175, 80, 0.3)';
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                    copyBtn.style.background = 'rgba(52, 152, 219, 0.2)';
+                    copyBtn.style.borderColor = 'rgba(52, 152, 219, 0.3)';
+                }, 2000);
+            }
+        }
+
+        // Floating particles effect
+        function createParticle() {
+            const particle = document.createElement('div');
+            particle.className = 'particle';
+            particle.style.left = Math.random() * 100 + 'vw';
+            particle.style.animationDuration = (Math.random() * 3 + 3) + 's';
+
+            document.body.appendChild(particle);
+
+            setTimeout(() => {
+                if (particle.parentNode) {
+                    particle.remove();
+                }
+            }, 6000);
+        }
+
+        // Create particles periodically
+        setInterval(createParticle, 3000);
+
+        // Smooth scroll for multiple cards
+        document.addEventListener('DOMContentLoaded', function () {
+            const cards = document.querySelectorAll('.card');
+            if (cards.length > 1) {
+                cards[cards.length - 1].scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center'
+                });
+            }
+        });
+    </script>
+</head>
+
+<body>
+
+</body>
+
+</html>
