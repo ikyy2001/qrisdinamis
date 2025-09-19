@@ -4,8 +4,8 @@
 <head>
     <meta charset="UTF-8">
     <title>QRIS Static To Dinamic</title>
-    <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+    <link rel="stylesheet" href="style.css">
     <script>
 
         function parseEMVString(qrisString) {
@@ -45,6 +45,43 @@
 
         function toHex4(crc) {
             return crc.toString(16).toUpperCase().padStart(4, '0');
+        }
+
+        function extractMerchantProviderAndId(map) {
+            // QRIS Merchant Account Information resides in tags 26..51
+            for (let tagNum = 26; tagNum <= 51; tagNum++) {
+                const tag = String(tagNum).padStart(2, '0');
+                const value = map[tag];
+                if (!value) continue;
+                // Parse nested TLV inside the MAI template
+                const { map: inner } = parseEMVString(value);
+                const gui = inner['00'] || '';
+                const merchantId = inner['01'] || '';
+                if (gui || merchantId) {
+                    return { providerGui: gui, merchantId };
+                }
+            }
+            return { providerGui: '', merchantId: '' };
+        }
+
+        function formatProviderNameFromGui(gui) {
+            if (!gui) return '';
+            // Normalize and split by dots
+            const parts = String(gui).split('.').filter(Boolean);
+            if (parts.length < 3) {
+                // Fallback: take middle or whole
+                const raw = parts[1] || parts[0] || '';
+                return raw
+                    .toLowerCase()
+                    .replace(/[_-]+/g, ' ')
+                    .replace(/\b\w/g, c => c.toUpperCase());
+            }
+            // Take everything between first and last segment(s)
+            const middle = parts.slice(1, -1).join(' ');
+            return middle
+                .toLowerCase()
+                .replace(/[_-]+/g, ' ')
+                .replace(/\b\w/g, c => c.toUpperCase());
         }
 
         function generateDynamicQris(qrisString, amount) {
@@ -119,7 +156,7 @@
                 try {
                     const file = fileInput.files && fileInput.files[0];
                     if (!file) {
-                        throw new Error('Pilih file terlebih dahulu.');
+                        throw new Error('Pilih file terlebihh dahulu.');
                     }
                     const qrisString = await decodeQrFile(file);
                     if (!qrisString) {
@@ -127,6 +164,8 @@
                         return;
                     }
                     const { map: parsed } = parseEMVString(qrisString);
+                    const { providerGui, merchantId } = extractMerchantProviderAndId(parsed);
+                    const providerName = formatProviderNameFromGui(providerGui);
                     resultsContainer.innerHTML = '';
                     const infoCard = document.createElement('div');
                     infoCard.className = 'card';
@@ -134,7 +173,8 @@
                 <h3>📊 Data QRIS</h3>
                 <p><b>Merchant Name:</b> ${parsed['59'] || '-'}</p>
                 <p><b>Merchant City:</b> ${parsed['60'] || '-'}</p>
-                <p><b>Merchant ID:</b> ${parsed['26'] || '-'}</p>
+                <p><b>Penyedia Merchant:</b> ${providerName || '-'}</p>
+                <p><b>Merchant ID:</b> ${merchantId || '-'}</p>
                 <label for="amount">💰 Nominal (IDR):</label>
                 <input type="number" id="amount" placeholder="Masukkan nominal..." required>
                 <button type="button" id="btnGenerate">🚀 Buat QRIS Dinamis</button>
@@ -146,22 +186,55 @@
                     btnGenerate.addEventListener('click', () => {
                         const amount = amountInput.value;
                         if (!amount) return;
-                        const dynamicQris = generateDynamicQris(qrisString, amount);
-                        const outputCard = document.createElement('div');
-                        outputCard.className = 'card';
-                        outputCard.innerHTML = `
+
+                        const originalGenText = btnGenerate.textContent;
+                        btnGenerate.classList.add('loading');
+                        btnGenerate.textContent = '⏳ Generating...';
+                        btnGenerate.disabled = true;
+
+                        // Generate in next frame to allow UI update
+                        requestAnimationFrame(() => {
+                            const dynamicQris = generateDynamicQris(qrisString, amount);
+                            const outputCard = document.createElement('div');
+                            outputCard.className = 'card';
+                            outputCard.innerHTML = `
                     <h3>🎯 QRIS Dinamis</h3>
                     <p><b>Nominal:</b> IDR ${Number(amount).toLocaleString('id-ID')}</p>
                     <textarea id="qrisResult" rows="6" readonly>${dynamicQris}</textarea>
                     <button type="button" class="copy-btn" id="copyBtn">📋 Copy QRIS String</button>
                     <div class="qr-img">
-                        <img src="https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(dynamicQris)}&size=200x200" alt="QRIS QR Code">
+                        <div class="spinner" aria-label="Loading"></div>
+                        <img style="display:none" src="https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(dynamicQris)}&size=200x200" alt="QRIS QR Code">
                     </div>
                 `;
-                        resultsContainer.appendChild(outputCard);
-                        const copyBtn = outputCard.querySelector('#copyBtn');
-                        copyBtn.addEventListener('click', copyToClipboard);
-                        setTimeout(() => outputCard.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
+                            resultsContainer.appendChild(outputCard);
+
+                            const copyBtn = outputCard.querySelector('#copyBtn');
+                            copyBtn.addEventListener('click', copyToClipboard);
+
+                            const img = outputCard.querySelector('img');
+                            const spinner = outputCard.querySelector('.spinner');
+                            img.addEventListener('load', () => {
+                                if (spinner) spinner.remove();
+                                img.style.display = '';
+                                btnGenerate.textContent = originalGenText;
+                                btnGenerate.classList.remove('loading');
+                                btnGenerate.disabled = false;
+                            });
+                            img.addEventListener('error', () => {
+                                if (spinner) spinner.remove();
+                                btnGenerate.textContent = originalGenText;
+                                btnGenerate.classList.remove('loading');
+                                btnGenerate.disabled = false;
+                            });
+
+                            // Trigger image load handler if cached
+                            if (img.complete) {
+                                img.dispatchEvent(new Event('load'));
+                            }
+
+                            setTimeout(() => outputCard.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
+                        });
                     });
                 } catch (e) {
                     showError(e.message || 'Terjadi kesalahan saat memproses file.');
