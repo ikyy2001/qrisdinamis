@@ -160,7 +160,7 @@
                     }
                     const qrisString = await decodeQrFile(file);
                     if (!qrisString) {
-                        showError('❌ Gagal decode QRIS. Pastikan file yang diuploadd adalah QRIS yang valid.');
+                        showError('❌ Gagal decode QRIS. Pastikan file yang diupload adalah QRIS yang valid.');
                         return;
                     }
                     const { map: parsed } = parseEMVString(qrisString);
