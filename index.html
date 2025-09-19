@@ -156,7 +156,7 @@
                 try {
                     const file = fileInput.files && fileInput.files[0];
                     if (!file) {
-                        throw new Error('Pilih file terlebihh dahulu.');
+                        throw new Error('Pilih file terlebih dahulu.');
                     }
                     const qrisString = await decodeQrFile(file);
                     if (!qrisString) {
